@@ -8,7 +8,7 @@ import EXTENT from '../../data/extent.js';
 import tileTransform from './tile_transform.js';
 
 import type Transform from '../../geo/transform.js';
-import type {Vec3} from 'gl-matrix';
+import type {Vec3, Vec4} from 'gl-matrix';
 import type MercatorCoordinate from '../mercator_coordinate.js';
 import type {ProjectionSpecification} from '../../style-spec/types.js';
 import type {CanonicalTileID, UnwrappedTileID} from '../../source/tile_id.js';
@@ -86,10 +86,19 @@ export default class Projection {
         return farthestPixelDistanceOnPlane(tr, tr.pixelsPerMeter);
     }
 
-    pointCoordinate(tr: Transform, x: number, y: number, z: number): MercatorCoordinate {
+    pointCoordinate(tr: Transform, p: Point, z: number): MercatorCoordinate {
         const horizonOffset = tr.horizonLineFromTop(false);
-        const clamped = new Point(x, Math.max(horizonOffset, y));
+        const clamped = new Point(p.x, Math.max(horizonOffset, p.y));
         return tr.rayIntersectionCoordinate(tr.pointRayIntersection(clamped, z));
+    }
+
+    pointCoordinate3D(tr: Transform, p: Point): ?Vec4 {
+        if (tr.elevation) {
+            return tr.elevation.pointCoordinate(p);
+        } else {
+            const mc = this.pointCoordinate(tr, p, 0);
+            return [mc.x, mc.y, mc.z, mc.toAltitude()];
+        }
     }
 
     createInversionMatrix(tr: Transform, id: CanonicalTileID): Float32Array { // eslint-disable-line

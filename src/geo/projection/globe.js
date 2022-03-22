@@ -103,9 +103,9 @@ export default class Globe extends Mercator {
         return Float32Array.from(matrix);
     }
 
-    pointCoordinate(tr: Transform, x: number, y: number, _: number): MercatorCoordinate {
+    pointCoordinate(tr: Transform, p: Point, _: number): MercatorCoordinate {
         const point0 = vec3.scale([], tr._camera.position, tr.worldSize);
-        const point1 = [x, y, 1, 1];
+        const point1 = [p.x, p.y, 1, 1];
 
         vec4.transformMat4(point1, point1, tr.pixelMatrixInverse);
         vec4.scale(point1, point1, 1 / point1[3]);
@@ -162,6 +162,11 @@ export default class Globe extends Mercator {
         const my = clamp(mercatorYfromLat(lat), 0, 1);
 
         return new MercatorCoordinate(mx, my);
+    }
+
+    pointCoordinate3D(tr: Transform, p: Point): ?Vec4 {
+        const mc = this.pointCoordinate(tr, p, 0);
+        return [mc.x, mc.y, mc.z, mc.toAltitude()];
     }
 
     farthestPixelDistance(tr: Transform): number {
