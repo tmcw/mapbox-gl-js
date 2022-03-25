@@ -8,7 +8,7 @@ import properties from './fill_extrusion_style_layer_properties.js';
 import {Transitionable, Transitioning, PossiblyEvaluated} from '../properties.js';
 import Point from '@mapbox/point-geometry';
 import ProgramConfiguration from '../../data/program_configuration.js';
-import {vec4} from 'gl-matrix';
+import {vec3, vec4} from 'gl-matrix';
 
 import type {FeatureState} from '../../style-spec/expression/index.js';
 import type {BucketParameters} from '../../data/bucket.js';
@@ -18,6 +18,7 @@ import type {LayerSpecification} from '../../style-spec/types.js';
 import type {TilespaceQueryGeometry} from '../query_geometry.js';
 import type {DEMSampler} from '../../terrain/elevation.js';
 import type {Vec2, Vec4} from 'gl-matrix';
+import { CanonicalTileID } from '../../source/tile_id.js';
 
 class FillExtrusionStyleLayer extends StyleLayer {
     _transitionablePaint: Transitionable<PaintProps>;
@@ -88,7 +89,7 @@ class FillExtrusionStyleLayer extends StyleLayer {
         if (isHidden) return false;
 
         const demSampler = terrainVisible ? elevationHelper : null;
-        const projected = projectExtrusion(geometry, base, height, translation, pixelPosMatrix, demSampler, centroid, exaggeration, transform.center.lat);
+        const projected = projectExtrusion(transform, geometry, base, height, translation, pixelPosMatrix, demSampler, centroid, exaggeration, transform.center.lat, queryGeometry.tileID.canonical);
         const projectedBase = projected[0];
         const projectedTop = projected[1];
 
@@ -190,11 +191,11 @@ function checkIntersection(projectedBase: Array<Point>, projectedTop: Array<Poin
     return closestDistance === Infinity ? false : closestDistance;
 }
 
-function projectExtrusion(geometry: Array<Array<Point>>, zBase: number, zTop: number, translation: Point, m: Float32Array, demSampler: ?DEMSampler, centroid: Vec2, exaggeration: number, lat: number) {
+function projectExtrusion(tr: Transform, geometry: Array<Array<Point>>, zBase: number, zTop: number, translation: Point, m: Float32Array, demSampler: ?DEMSampler, centroid: Vec2, exaggeration: number, lat: number, tileID: CanonicalTileID) {
     if (demSampler) {
-        return projectExtrusion3D(geometry, zBase, zTop, translation, m, demSampler, centroid, exaggeration, lat);
+        return projectExtrusion3D(tr, geometry, zBase, zTop, translation, m, demSampler, centroid, exaggeration, lat, tileID);
     } else {
-        return projectExtrusion2D(geometry, zBase, zTop, translation, m);
+        return projectExtrusion2D(tr, geometry, zBase, zTop, translation, m, tileID);
     }
 }
 
@@ -205,51 +206,127 @@ function projectExtrusion(geometry: Array<Array<Point>>, zBase: number, zTop: nu
  * different points can only be done once. This produced a measurable
  * performance improvement.
  */
-function projectExtrusion2D(geometry: Array<Array<Point>>, zBase: number, zTop: number, translation: Point, m: Float32Array) {
+function projectExtrusion2D(tr: Transform, geometry: Array<Array<Point>>, zBase: number, zTop: number, translation: Point, m: Float32Array, tileID: CanonicalTileID) {
     const projectedBase = [];
     const projectedTop = [];
 
-    const baseXZ = m[8] * zBase;
-    const baseYZ = m[9] * zBase;
-    const baseZZ = m[10] * zBase;
-    const baseWZ = m[11] * zBase;
-    const topXZ = m[8] * zTop;
-    const topYZ = m[9] * zTop;
-    const topZZ = m[10] * zTop;
-    const topWZ = m[11] * zTop;
+    if (tr.projection.name === 'globe') {
+        // Use a separate code path for globe projection so that the performance doesn't
+        // degrade with other projections
+        const elevationScale = tr.projection.upVectorScale(tileID, tr.center.lat, tr.worldSize).metersToTile;
+        const basePoint = [0, 0, 0, 1];
+        const topPoint = [0, 0, 0, 1];
 
-    for (const r of geometry) {
-        const ringBase = [];
-        const ringTop = [];
-        for (const p of r) {
-            const x = p.x + translation.x;
-            const y = p.y + translation.y;
+        const setPoint = (point, x, y, z) => {
+            point[0] = x;
+            point[1] = y;
+            point[2] = z;
+            point[3] = 1;
+        };
 
-            const sX = m[0] * x + m[4] * y + m[12];
-            const sY = m[1] * x + m[5] * y + m[13];
-            const sZ = m[2] * x + m[6] * y + m[14];
-            const sW = m[3] * x + m[7] * y + m[15];
+        for (const r of geometry) {
+            const ringBase = [];
+            const ringTop = [];
+            for (const p of r) {
+                const x = p.x + translation.x;
+                const y = p.y + translation.y;
 
-            const baseX = sX + baseXZ;
-            const baseY = sY + baseYZ;
-            const baseZ = sZ + baseZZ;
-            const baseW = Math.max(sW + baseWZ, 0.00001);
+                // Reproject tile coordinate into ecef and apply elevation to correct direction
+                const reproj = tr.projection.projectTilePoint(x, y, tileID);
+                const dir = tr.projection.upVector(tileID, p.x, p.y);
 
-            const topX = sX + topXZ;
-            const topY = sY + topYZ;
-            const topZ = sZ + topZZ;
-            const topW = Math.max(sW + topWZ, 0.00001);
+                if (zBase !== 0) {
+                    setPoint(
+                        basePoint,
+                        reproj.x + dir[0] * elevationScale * zBase,
+                        reproj.y + dir[1] * elevationScale * zBase,
+                        reproj.z + dir[2] * elevationScale * zBase);
+                } else {
+                    setPoint(basePoint, reproj.x, reproj.y, reproj.z);
+                }
 
-            const b = new Point(baseX / baseW, baseY / baseW);
-            b.z = baseZ / baseW;
-            ringBase.push(b);
+                setPoint(
+                    topPoint,
+                    reproj.x + dir[0] * elevationScale * zTop,
+                    reproj.y + dir[1] * elevationScale * zTop,
+                    reproj.z + dir[2] * elevationScale * zTop);
 
-            const t = new Point(topX / topW, topY / topW);
-            t.z = topZ / topW;
-            ringTop.push(t);
+                vec3.transformMat4(basePoint, basePoint, m);
+                vec3.transformMat4(topPoint, topPoint, m);
+
+                ringBase.push(toPoint(basePoint));
+                ringTop.push(toPoint(topPoint));
+
+                // const sX = m[0] * x + m[4] * y + m[12];
+                // const sY = m[1] * x + m[5] * y + m[13];
+                // const sZ = m[2] * x + m[6] * y + m[14];
+                // const sW = m[3] * x + m[7] * y + m[15];
+
+                // const baseX = sX + baseXZ;
+                // const baseY = sY + baseYZ;
+                // const baseZ = sZ + baseZZ;
+                // const baseW = Math.max(sW + baseWZ, 0.00001);
+
+                // const topX = sX + topXZ;
+                // const topY = sY + topYZ;
+                // const topZ = sZ + topZZ;
+                // const topW = Math.max(sW + topWZ, 0.00001);
+
+                // const b = new Point(baseX / baseW, baseY / baseW);
+                // b.z = baseZ / baseW;
+                // ringBase.push(b);
+
+                // const t = new Point(topX / topW, topY / topW);
+                // t.z = topZ / topW;
+                // ringTop.push(t);
+            }
+            projectedBase.push(ringBase);
+            projectedTop.push(ringTop);
         }
-        projectedBase.push(ringBase);
-        projectedTop.push(ringTop);
+
+    } else {
+        const baseXZ = m[8] * zBase;
+        const baseYZ = m[9] * zBase;
+        const baseZZ = m[10] * zBase;
+        const baseWZ = m[11] * zBase;
+        const topXZ = m[8] * zTop;
+        const topYZ = m[9] * zTop;
+        const topZZ = m[10] * zTop;
+        const topWZ = m[11] * zTop;
+
+        for (const r of geometry) {
+            const ringBase = [];
+            const ringTop = [];
+            for (const p of r) {
+                const x = p.x + translation.x;
+                const y = p.y + translation.y;
+
+                const sX = m[0] * x + m[4] * y + m[12];
+                const sY = m[1] * x + m[5] * y + m[13];
+                const sZ = m[2] * x + m[6] * y + m[14];
+                const sW = m[3] * x + m[7] * y + m[15];
+
+                const baseX = sX + baseXZ;
+                const baseY = sY + baseYZ;
+                const baseZ = sZ + baseZZ;
+                const baseW = Math.max(sW + baseWZ, 0.00001);
+
+                const topX = sX + topXZ;
+                const topY = sY + topYZ;
+                const topZ = sZ + topZZ;
+                const topW = Math.max(sW + topWZ, 0.00001);
+
+                const b = new Point(baseX / baseW, baseY / baseW);
+                b.z = baseZ / baseW;
+                ringBase.push(b);
+
+                const t = new Point(topX / topW, topY / topW);
+                t.z = topZ / topW;
+                ringTop.push(t);
+            }
+            projectedBase.push(ringBase);
+            projectedTop.push(ringTop);
+        }
     }
     return [projectedBase, projectedTop];
 }
@@ -263,7 +340,7 @@ function projectExtrusion2D(geometry: Array<Array<Point>>, zBase: number, zTop: 
  * - Texture querying is performed in texture pixel coordinates instead of  normalized uv coordinates.
  * - Height offset calculation for fill-extrusion-base is offset with -1 instead of -5 to prevent underground picking.
  */
-function projectExtrusion3D(geometry: Array<Array<Point>>, zBase: number, zTop: number, translation: Point, m: Float32Array, demSampler: DEMSampler, centroid: Vec2, exaggeration: number, lat: number) {
+function projectExtrusion3D(tr: Transform, geometry: Array<Array<Point>>, zBase: number, zTop: number, translation: Point, m: Float32Array, demSampler: DEMSampler, centroid: Vec2, exaggeration: number, lat: number, tileID: CanonicalTileID) {
     const projectedBase = [];
     const projectedTop = [];
     const v = [0, 0, 0, 1];

@@ -13,6 +13,7 @@ import {Ray} from '../util/primitives.js';
 import MercatorCoordinate from '../geo/mercator_coordinate.js';
 import type {OverscaledTileID} from '../source/tile_id.js';
 import {getTilePoint, getTileVec3} from '../geo/projection/tile_transform.js';
+import resample from '../geo/projection/resample.js';
 
 /**
  * A data-class that represents a screenspace query from `Map#queryRenderedFeatures`.
@@ -26,7 +27,7 @@ export class QueryGeometry {
     cameraPoint: Point;
     screenGeometry: Point[];
     screenGeometryMercator: MercatorCoordinate[];
-    cameraGeometry: Point[];
+    //cameraGeometry: Point[];
 
     _screenRaycastCache: { [_: number]: MercatorCoordinate[]};
     _cameraRaycastCache: { [_: number]: MercatorCoordinate[]};
@@ -42,7 +43,7 @@ export class QueryGeometry {
 
         this.screenGeometry = this.bufferedScreenGeometry(0);
         this.screenGeometryMercator = this.screenGeometry.map((p) => transform.pointCoordinate3D(p));
-        this.cameraGeometry = this.bufferedCameraGeometry(0);
+        //this.cameraGeometry = this.bufferedCameraGeometry(0);
     }
 
     /**
@@ -141,6 +142,9 @@ export class QueryGeometry {
      *         X XXXX
      *         XXX.
      *
+     * In globe view the camera point is not restricted to underneath of the query polygon anymore.
+     * All 8 possible cases (sectors) needs to be checked.
+     * 
      * @param {number} buffer The tile padding in screenspace pixels.
      * @returns {Point[]} The buffered query geometry.
      */
@@ -149,19 +153,51 @@ export class QueryGeometry {
         const max = this.screenBounds.length === 1 ? this.screenBounds[0].add(new Point(1, 1)) : this.screenBounds[1];
         const cameraPolygon = polygonizeBounds(min, max, 0, false);
 
-        // Only need to account for point underneath camera if its behind query volume
-        if (this.cameraPoint.y > max.y) {
-            //case 1: insert point in the middle
-            if (this.cameraPoint.x > min.x && this.cameraPoint.x < max.x) {
-                cameraPolygon.splice(3, 0, this.cameraPoint);
-            //case 2: replace btm right point
-            } else if (this.cameraPoint.x >= max.x) {
-                cameraPolygon[2] = this.cameraPoint;
-            //case 3: replace btm left point
-            } else if (this.cameraPoint.x <= min.x) {
+        const column = (this.cameraPoint.x >= min.x) + (this.cameraPoint.x >= max.x);
+        const row = (this.cameraPoint.y >= min.y) + (this.cameraPoint.y >= max.y);
+        const sector = row * 3 + column;
+
+        // Note that sector 4 can be ignored as it's inside the query polygon
+        switch (sector) {
+            case 0:     // replace top-left point
+                cameraPolygon[0] = this.cameraPoint;
+                break;
+            case 1:     // insert point in the middle of top-left and top-right
+                cameraPolygon.splice(1, 0, this.cameraPoint);
+                break;
+            case 2:     // replace top-right point
+                cameraPolygon[1] = this.cameraPoint;
+                break;
+            case 3:     // insert point in the middle of top-left and bottom-left
+                cameraPolygon.splice(4, 0, this.cameraPoint);
+                break;
+            case 5:     // insert point in the middle of top-right and bottom-right
+                cameraPolygon.splice(2, 0, this.cameraPoint);
+                break;
+            case 6:     // replace bottom-left point
                 cameraPolygon[3] = this.cameraPoint;
-            }
+                break;
+            case 7:     // insert point in the middle of bottom-left and bottom-right
+                cameraPolygon.splice(3, 0, this.cameraPoint);
+                break;
+            case 8:     // replace bottom-right point
+                cameraPolygon[2] = this.cameraPoint;
+                break;
         }
+
+        // // Only need to account for point underneath camera if its behind query volume
+        // if (this.cameraPoint.y > max.y) {
+        //     //case 1: insert point in the middle
+        //     if (this.cameraPoint.x > min.x && this.cameraPoint.x < max.x) {
+        //         cameraPolygon.splice(3, 0, this.cameraPoint);
+        //     //case 2: replace btm right point
+        //     } else if (this.cameraPoint.x >= max.x) {
+        //         cameraPolygon[2] = this.cameraPoint;
+        //     //case 3: replace btm left point
+        //     } else if (this.cameraPoint.x <= min.x) {
+        //         cameraPolygon[3] = this.cameraPoint;
+        //     }
+        // }
 
         return bufferConvexPolygon(cameraPolygon, buffer);
     }
@@ -233,10 +269,43 @@ export class QueryGeometry {
         if (this._cameraRaycastCache[key]) {
             return this._cameraRaycastCache[key];
         } else {
-            const poly = this.bufferedCameraGeometry(padding).map((p) => transform.pointCoordinate3D(p));
-            this._cameraRaycastCache[key] = poly;
+            const poly = this.bufferedCameraGeometry(padding);
+            let projPoly: MercatorCoordinate[] = null;
+
+            // Edges of query polygons are not straight when projected on the surface of the globe.
+            // For this reason resampling might be required
+            if (transform.projection.name === 'globe') {
+                projPoly = this._resamplePolygon(poly, transform);
+            } else {
+                projPoly = poly.map((p) => transform.pointCoordinate3D(p));
+            }
+
+
+            //let poly = this.bufferedCameraGeometry(padding).map((p) => transform.pointCoordinate3D(p));
+
+            //if (transform.projection.name === 'globe') {
+            //    poly = this._resamplePolygon(poly, transform);
+            //}
+
+            this._cameraRaycastCache[key] = projPoly;
             return poly;
         }
+    }
+
+    _resamplePolygon(poly: Point[], transform: Transform): MercatorCoordinate[] {
+        // Error threshold value of 1 / 128 (in mercator units) for resampling is roughly 300km at equator.
+        const errorThreshold = 1.0 / 128.0;
+
+        const resampled = resample(
+            poly,
+            p => {
+                const mc = transform.pointCoordinate3D(p);
+                p.x = mc.x;
+                p.y = mc.y;
+            },
+            errorThreshold);
+
+        return resampled.map(p => new MercatorCoordinate(p.x, p.y));
     }
 }
 

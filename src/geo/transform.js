@@ -2,7 +2,7 @@
 
 import LngLat from './lng_lat.js';
 import LngLatBounds from './lng_lat_bounds.js';
-import MercatorCoordinate, {mercatorXfromLng, mercatorYfromLat, mercatorZfromAltitude, latFromMercatorY, MAX_MERCATOR_LATITUDE, circumferenceAtLatitude} from './mercator_coordinate.js';
+import MercatorCoordinate, {mercatorXfromLng, mercatorYfromLat, mercatorZfromAltitude, latFromMercatorY, lngFromMercatorX, MAX_MERCATOR_LATITUDE, circumferenceAtLatitude} from './mercator_coordinate.js';
 import {getProjection} from './projection/index.js';
 import {tileAABB} from '../geo/projection/tile_transform.js';
 import Point from '@mapbox/point-geometry';
@@ -17,7 +17,7 @@ import assert from 'assert';
 import getProjectionAdjustments, {getProjectionAdjustmentInverted, getScaleAdjustment} from './projection/adjustments.js';
 import {getPixelsToTileUnitsMatrix} from '../source/pixels_to_tile_units.js';
 import {UnwrappedTileID, OverscaledTileID, CanonicalTileID} from '../source/tile_id.js';
-import {calculateGlobeMatrix} from '../geo/projection/globe_util.js';
+import {calculateGlobeMatrix, latLngToECEF} from '../geo/projection/globe_util.js';
 
 import type Projection from '../geo/projection/projection.js';
 import type {Elevation} from '../terrain/elevation.js';
@@ -1993,9 +1993,24 @@ class Transform {
      * the camera is right above the center of the map.
      */
     getCameraPoint(): Point {
-        const pitch = this._pitch;
-        const yOffset = Math.tan(pitch) * (this.cameraToCenterDistance || 1);
-        return this.centerPoint.add(new Point(0, yOffset));
+        if (this.projection.name === 'globe') {
+            // Find precise location of the projected camera position on the curved surface
+            const posMerc = this._camera.position;
+            const pos = [...latLngToECEF(latFromMercatorY(posMerc[1]), lngFromMercatorX(posMerc[0])), 1];
+
+            vec4.transformMat4(pos, pos, this.globeMatrix);
+            vec4.transformMat4(pos, pos, this.pixelMatrix);
+
+            // Clamp distance to a positive value so we can avoid screen coordinate
+            // being flipped due to perspective projection
+            pos[3] = Math.max(pos[3], 0.000001);
+
+            return new Point(pos[0] / pos[3], pos[1] / pos[3]);
+        } else {
+            const pitch = this._pitch;
+            const yOffset = Math.tan(pitch) * (this.cameraToCenterDistance || 1);
+            return this.centerPoint.add(new Point(0, yOffset));
+        }
     }
 }
 
