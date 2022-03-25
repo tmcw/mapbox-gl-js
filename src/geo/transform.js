@@ -1995,10 +1995,11 @@ class Transform {
     getCameraPoint(): Point {
         if (this.projection.name === 'globe') {
             // Find precise location of the projected camera position on the curved surface
-            const posMerc = this._camera.position;
-            const pos = [...latLngToECEF(latFromMercatorY(posMerc[1]), lngFromMercatorX(posMerc[0])), 1];
+            const pos = [this.globeMatrix[12], this.globeMatrix[13], this.globeMatrix[14], 1];
+            //const posMerc = this._camera.position;
+            //const pos = [...latLngToECEF(latFromMercatorY(posMerc[1]), lngFromMercatorX(posMerc[0])), 1];
 
-            vec4.transformMat4(pos, pos, this.globeMatrix);
+            //vec4.transformMat4(pos, pos, this.globeMatrix);
             vec4.transformMat4(pos, pos, this.pixelMatrix);
 
             // Clamp distance to a positive value so we can avoid screen coordinate

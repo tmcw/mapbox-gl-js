@@ -39,6 +39,7 @@ import type VertexBuffer from '../../gl/vertex_buffer.js';
 import type {FeatureStates} from '../../source/source_state.js';
 import type {SpritePositions} from '../../util/image.js';
 import type {TileTransform} from '../../geo/projection/tile_transform.js';
+import {earthRadius} from '../../geo/lng_lat.js';
 
 const FACTOR = Math.pow(2, 13);
 
@@ -604,4 +605,14 @@ function tileToMeter(canonical: CanonicalTileID) {
     const exp = Math.exp(Math.PI * (1 - 2 * mercatorY));
     // simplify cos(2 * atan(e) - PI/2) from mercator_coordinate.js, remove trigonometrics.
     return circumferenceAtEquator * 2 * exp / (exp * exp + 1) / EXTENT / (1 << canonical.z);
+}
+
+export function fillExtrusionHeightLift(): number {
+    // A rectangle covering globe is subdivided into a grid of 32 cells
+    // This information can be used to deduce a minimum lift value so that
+    // fill extrusions with 0 height will never go below the ground.
+    const angle = Math.PI / 32.0;
+    const tanAngle = Math.tan(angle);
+    const r = earthRadius;
+    return r * Math.sqrt(1.0 + 2.0 * tanAngle * tanAngle) - r;
 }

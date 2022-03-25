@@ -1,7 +1,7 @@
 // @flow
 
 import StyleLayer from '../style_layer.js';
-import FillExtrusionBucket, {ELEVATION_SCALE, ELEVATION_OFFSET} from '../../data/bucket/fill_extrusion_bucket.js';
+import FillExtrusionBucket, {ELEVATION_SCALE, ELEVATION_OFFSET, fillExtrusionHeightLift} from '../../data/bucket/fill_extrusion_bucket.js';
 import {polygonIntersectsPolygon, polygonIntersectsMultiPolygon} from '../../util/intersection_tests.js';
 import {translateDistance, tilespaceTranslate} from '../query_utils.js';
 import properties from './fill_extrusion_style_layer_properties.js';
@@ -224,6 +224,14 @@ function projectExtrusion2D(tr: Transform, geometry: Array<Array<Point>>, zBase:
             point[3] = 1;
         };
 
+        // Fixed "lift" value is added to height so that 0-height fill extrusions wont clip with the globe surface
+        const lift = fillExtrusionHeightLift();
+
+        if (zBase > 0) {
+            zBase += lift;
+        }
+        zTop += lift;
+
         for (const r of geometry) {
             const ringBase = [];
             const ringTop = [];
@@ -234,7 +242,7 @@ function projectExtrusion2D(tr: Transform, geometry: Array<Array<Point>>, zBase:
                 // Reproject tile coordinate into ecef and apply elevation to correct direction
                 const reproj = tr.projection.projectTilePoint(x, y, tileID);
                 const dir = tr.projection.upVector(tileID, p.x, p.y);
-
+                
                 if (zBase !== 0) {
                     setPoint(
                         basePoint,

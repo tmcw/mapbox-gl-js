@@ -288,13 +288,13 @@ export class QueryGeometry {
             //}
 
             this._cameraRaycastCache[key] = projPoly;
-            return poly;
+            return projPoly;
         }
     }
 
     _resamplePolygon(poly: Point[], transform: Transform): MercatorCoordinate[] {
-        // Error threshold value of 1 / 128 (in mercator units) for resampling is roughly 300km at equator.
-        const errorThreshold = 1.0 / 128.0;
+        // Error threshold value of 1 / 1024 (in mercator units) for resampling is roughly 40km at equator.
+        const errorThreshold = 1.0 / 1024.0;
 
         const resampled = resample(
             poly,
